@@ -610,10 +610,15 @@ function ChatInterface() {
             compressor.threshold.value = -24; compressor.knee.value = 30; compressor.ratio.value = 12;
             compressor.attack.value = 0.003; compressor.release.value = 0.25;
 
-            // 6. Gain 4.0x (Makeup gain)
+            // 6. Adaptive Gain (4.0x for Desktop, 2.5x for Mobile)
+            const isMobile = /iPhone|iPad|iPod|Android/i.test(navigator.userAgent);
+            const GAIN_VALUE = isMobile ? 2.5 : 4.0;
+
             const gainNode = audioContext.createGain();
-            gainNode.gain.value = 4.0;
+            gainNode.gain.value = GAIN_VALUE;
             gainNodeRef.current = gainNode;
+
+            console.log(`Audio Config: Mobile=${isMobile}, Gain=${GAIN_VALUE}`);
 
             // CHAIN CONNECTION
             source.connect(hpf);
@@ -688,11 +693,14 @@ function ChatInterface() {
         // Logic only if in Voice Mode and AI not speaking
         if (modeRef.current === 'voice' && !isAiSpeakingRef.current) {
 
-            // Thresholds
-            // Thresholds (Increased for Mobile Resilience with 4x Gain)
-            const START_THRESHOLD = 20; // Harder to start (was 15)
-            const STOP_THRESHOLD = 10;   // Easier to stop (was 5)
-            const SILENCE_LIMIT = 1500; // 1.5s
+            // Adaptive Thresholds
+            const isMobile = /iPhone|iPad|iPod|Android/i.test(navigator.userAgent);
+
+            // Mobile: Lower gain (2.5x) but closer mic -> Threshold 20
+            // Desktop: Higher gain (4.0x) but distant mic -> Threshold 25
+            const START_THRESHOLD = isMobile ? 20 : 25;
+            const STOP_THRESHOLD = 10;
+            const SILENCE_LIMIT = 1500;
 
             if (!isRecordingRef.current) {
                 // WAITING STATE

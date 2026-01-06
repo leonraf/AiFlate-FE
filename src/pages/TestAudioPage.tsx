@@ -95,9 +95,12 @@ export default function TestAudioPage() {
                 compressor.attack.value = 0.003;
                 compressor.release.value = 0.25;
 
-                // 6. Makeup Gain
+                // 6. Adaptive Gain
+                const isMobile = /iPhone|iPad|iPod|Android/i.test(navigator.userAgent);
+                const GAIN_VALUE = isMobile ? 2.5 : 4.0;
+
                 const gainNode = audioContext.createGain();
-                gainNode.gain.value = 4.0; // Keep high volume
+                gainNode.gain.value = GAIN_VALUE;
 
                 // CONNECT THE CHAIN
                 source.connect(hpf);
@@ -139,7 +142,7 @@ export default function TestAudioPage() {
                 };
 
                 setIsMicReady(true);
-                setStatus("Microfono Ottimizzato (Anti-Boom Chain).");
+                setStatus(`Mic Ottimizzato (${isMobile ? 'Mobile Mode' : 'Desktop Mode'})`);
                 detectSilence();
 
             } catch (err) {
@@ -219,9 +222,10 @@ export default function TestAudioPage() {
         setAudioVolume(avg);
 
         if (isListeningRef.current) {
-            // Signal is 4x boosted now, so threshold might be higher.
-            const START_THRESHOLD = 20; // Harder to start (was 15)
-            const STOP_THRESHOLD = 10;   // Easier to stop (was 5)
+            // Adaptive Thresholds
+            const isMobile = /iPhone|iPad|iPod|Android/i.test(navigator.userAgent);
+            const START_THRESHOLD = isMobile ? 20 : 25;
+            const STOP_THRESHOLD = 10;
             const SILENCE_LIMIT = 1500;
 
             if (!isSpeechActiveRef.current) {
