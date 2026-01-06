@@ -566,13 +566,23 @@ function ChatInterface() {
         try {
             console.log("Initializing Hot Mic Chain...");
 
-            // UNIVERSAL HIGH-FIDELITY CONSTRAINTS
+            // ADAPTIVE CONSTRAINTS
+            // Mobile: Enable DSP (Echo/Noise Cancellation) to handle noisy environments.
+            // Desktop: Disable DSP (High Fidelity) for best quality.
+            const isMobile = /iPhone|iPad|iPod|Android/i.test(navigator.userAgent);
+
             const constraints = {
                 audio: {
-                    autoGainControl: false, echoCancellation: false, noiseSuppression: false,
-                    channelCount: 1, sampleRate: 48000,
-                    googAutoGainControl: false, googNoiseSuppression: false, googHighpassFilter: false,
-                    mozAutoGainControl: false, mozNoiseSuppression: false,
+                    autoGainControl: isMobile,
+                    echoCancellation: isMobile,
+                    noiseSuppression: isMobile,
+                    channelCount: 1,
+                    sampleRate: 48000,
+                    // If desktop, force raw audio
+                    ...(isMobile ? {} : {
+                        googAutoGainControl: false, googNoiseSuppression: false, googHighpassFilter: false,
+                        mozAutoGainControl: false, mozNoiseSuppression: false,
+                    })
                 }
             } as MediaStreamConstraints;
 
@@ -611,8 +621,7 @@ function ChatInterface() {
             compressor.attack.value = 0.003; compressor.release.value = 0.25;
 
             // 6. Adaptive Gain (4.0x for Desktop, 2.5x for Mobile)
-            const isMobile = /iPhone|iPad|iPod|Android/i.test(navigator.userAgent);
-            const GAIN_VALUE = isMobile ? 1.1 : 4.0;
+            const GAIN_VALUE = isMobile ? 2.0 : 4.0;
 
             const gainNode = audioContext.createGain();
             gainNode.gain.value = GAIN_VALUE;
@@ -696,9 +705,9 @@ function ChatInterface() {
             // Adaptive Thresholds
             const isMobile = /iPhone|iPad|iPod|Android/i.test(navigator.userAgent);
 
-            // Mobile: Lower gain (1.1x) + Higher Thresh (35)
-            // Desktop: Higher gain (4.0x) + Medium Thresh (25)
-            const START_THRESHOLD = isMobile ? 35 : 25;
+            // Mobile (DSP On): Clean signal, so we can use standard thresholds (20).
+            // Desktop (DSP Off): High sensitivity, thresholds (25).
+            const START_THRESHOLD = isMobile ? 20 : 25;
             const STOP_THRESHOLD = 10;
             const SILENCE_LIMIT = 1500;
 

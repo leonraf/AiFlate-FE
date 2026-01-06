@@ -38,19 +38,21 @@ export default function TestAudioPage() {
     useEffect(() => {
         const initMicrophone = async () => {
             try {
-                setStatus("Attivazione Vocal Chain (Anti-Boom)...");
+                const isMobile = /iPhone|iPad|iPod|Android/i.test(navigator.userAgent);
+                setStatus(`Attivazione Mic (${isMobile ? 'Mobile DSP' : 'Desktop HQ'})...`);
+
                 const constraints = {
                     audio: {
-                        autoGainControl: false,
-                        echoCancellation: false,
-                        noiseSuppression: false,
+                        autoGainControl: isMobile,
+                        echoCancellation: isMobile,
+                        noiseSuppression: isMobile,
                         channelCount: 1,
                         sampleRate: 48000,
-                        googAutoGainControl: false,
-                        googNoiseSuppression: false,
-                        googHighpassFilter: false,
-                        mozAutoGainControl: false,
-                        mozNoiseSuppression: false,
+                        // If desktop, force raw audio
+                        ...(isMobile ? {} : {
+                            googAutoGainControl: false, googNoiseSuppression: false, googHighpassFilter: false,
+                            mozAutoGainControl: false, mozNoiseSuppression: false,
+                        })
                     }
                 } as MediaStreamConstraints["audio"];
 
@@ -96,8 +98,8 @@ export default function TestAudioPage() {
                 compressor.release.value = 0.25;
 
                 // 6. Adaptive Gain
-                const isMobile = /iPhone|iPad|iPod|Android/i.test(navigator.userAgent);
-                const GAIN_VALUE = isMobile ? 1.1 : 4.0;
+                // Mobile: 2.0x (DSP active). Desktop: 4.0x (Raw).
+                const GAIN_VALUE = isMobile ? 2.0 : 4.0;
 
                 const gainNode = audioContext.createGain();
                 gainNode.gain.value = GAIN_VALUE;
