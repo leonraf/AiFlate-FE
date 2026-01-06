@@ -1,5 +1,5 @@
 import { useState, useRef, useEffect } from 'react';
-import { Send, Mic, Square, Bot, User, Lock, ArrowLeft, Loader2, Volume2, Globe } from 'lucide-react';
+import { Send, Mic, Bot, User, Lock, ArrowLeft, Loader2, Volume2, Globe, Phone } from 'lucide-react';
 import { Link } from 'react-router-dom';
 import { motion } from 'framer-motion';
 import { cn } from '../lib/utils';
@@ -139,6 +139,7 @@ function ChatInterface() {
     const [isAiSpeaking, setIsAiSpeaking] = useState(false);
     const [isSpeechDetected, setIsSpeechDetected] = useState(false); // UI Feedback for VAD
     const [audioVolume, setAudioVolume] = useState(0);
+    const [isConnecting, setIsConnecting] = useState(false); // Animation State
 
     const scrollRef = useRef<HTMLDivElement>(null);
 
@@ -147,7 +148,7 @@ function ChatInterface() {
     const [, setSessionId] = useState<string | null>(null);
     const sessionIdRef = useRef<string | null>(null); // Ref for stale closure access
     const wsRef = useRef<WebSocket | null>(null);
-    const streamingCtxRef = useRef<AudioContext | null>(null);
+    const mainAudioContextRef = useRef<AudioContext | null>(null); // Shared Context
     const nextStartTimeRef = useRef<number>(0);
     const isAiSpeakingRef = useRef<boolean>(false);
     const audioResidueRef = useRef<Uint8Array | null>(null);
@@ -165,7 +166,7 @@ function ChatInterface() {
     // ... existing useEffect
 
     const scheduleAudioChunk = async (base64Data: string) => {
-        const ctx = streamingCtxRef.current;
+        const ctx = mainAudioContextRef.current;
         if (!ctx) return;
 
         try {
@@ -251,7 +252,7 @@ function ChatInterface() {
     };
 
     const flushPlaybackQueue = () => {
-        const ctx = streamingCtxRef.current;
+        const ctx = mainAudioContextRef.current;
         if (!ctx) return;
 
         while (playbackQueueRef.current.length > 0) {
@@ -281,7 +282,7 @@ function ChatInterface() {
 
     // Voice Refs
     const scriptProcessorRef = useRef<ScriptProcessorNode | null>(null);
-    const audioContextRef = useRef<AudioContext | null>(null);
+    // audioContextRef removed - using mainAudioContextRef
     const analyserRef = useRef<AnalyserNode | null>(null);
     const gainNodeRef = useRef<GainNode | null>(null); // To reference the gain node if needed
 
@@ -331,26 +332,27 @@ function ChatInterface() {
                         audioResidueRef.current = null;
 
                         // Reset Jitter Buffer
+                        // Reset Jitter Buffer
                         playbackQueueRef.current = [];
                         hasStartedPlayingRef.current = false;
-                        nextStartTimeRef.current = streamingCtxRef.current?.currentTime || 0;
+                        nextStartTimeRef.current = mainAudioContextRef.current?.currentTime || 0;
 
                         // Initialize context if needed
-                        if (!streamingCtxRef.current) {
-                            streamingCtxRef.current = new (window.AudioContext || (window as any).webkitAudioContext)();
+                        if (!mainAudioContextRef.current) {
+                            mainAudioContextRef.current = new (window.AudioContext || (window as any).webkitAudioContext)();
                         }
                         // Reset scheduler time to now (or slightly future)
-                        if (streamingCtxRef.current.state === 'suspended') {
-                            await streamingCtxRef.current.resume();
+                        if (mainAudioContextRef.current.state === 'suspended') {
+                            await mainAudioContextRef.current.resume();
                         }
-                        nextStartTimeRef.current = streamingCtxRef.current.currentTime + 0.1; // small buffer
+                        nextStartTimeRef.current = mainAudioContextRef.current.currentTime + 0.1; // small buffer
                     }
                     else if (msg.type === 'audio_chunk') {
                         await scheduleAudioChunk(msg.data);
                     }
                     else if (msg.type === 'tts_end') {
                         // We wait for the last chunk to finish playing based on timing
-                        const ctx = streamingCtxRef.current;
+                        const ctx = mainAudioContextRef.current;
                         if (ctx) {
                             const remainingTime = nextStartTimeRef.current - ctx.currentTime;
                             setTimeout(() => {
@@ -378,43 +380,58 @@ function ChatInterface() {
 
         return () => {
             wsRef.current?.close();
-            if (streamingCtxRef.current) streamingCtxRef.current.close();
+            // Do NOT close mainAudioContextRef here loosely, or handle carefully
+            // Actually, we should probably let the component unmount cleanup handle it later?
+            // But this useEffect is on [] (mount), so it runs on unmount.
+            // Yes, close it.
+            if (mainAudioContextRef.current) mainAudioContextRef.current.close();
         };
     }, []);
 
 
 
     // --- 2. SWITCH TO VOICE MODE (INIT HOT MIC) ---
-    // --- 2. SWITCH TO VOICE MODE (INIT HOT MIC) ---
+    // --- 2. SWITCH TO VOICE MODE (INIT HOT MIC WITH ANIMATION) ---
     useEffect(() => {
         modeRef.current = mode;
         if (mode === 'voice') {
             const shouldPlayWelcome = messages.length <= 1 && !hasPlayedWelcomeRef.current;
 
             if (shouldPlayWelcome) {
-                // Play Welcome Logic (Sequential)
-                const welcomeAudio = new Audio('/benvenuto.wav');
+                // 1. Start Animation & Init Mic (Silent Scatto)
+                setIsConnecting(true);
+
+                // CRITICAL: Block VAD immediately during animation & welcome audio
                 setIsAiSpeaking(true);
                 isAiSpeakingRef.current = true;
                 hasPlayedWelcomeRef.current = true;
 
-                // User Request: Activate Mic after 4.5 seconds
+                // Init Mic immediately (the change in OS audio mode happens now, masked by animation)
+                if (!isMicInitialized.current) initHotMic();
+
+                // 2. Wait 2 seconds (User sees animation)
                 setTimeout(() => {
-                    if (!isMicInitialized.current) initHotMic();
-                }, 4500);
+                    setIsConnecting(false);
 
-                welcomeAudio.onended = () => {
-                    setIsAiSpeaking(false);
-                    isAiSpeakingRef.current = false;
-                };
+                    // 3. Play Welcome Audio (Clean, because mic is already active)
+                    const welcomeAudio = new Audio('/benvenuto.wav');
 
-                welcomeAudio.play().catch(e => {
-                    console.error("Auto-play blocked:", e);
-                    // Fallback: Init mic immediately if audio fails
-                    if (!isMicInitialized.current) initHotMic();
-                    setIsAiSpeaking(false);
-                    isAiSpeakingRef.current = false;
-                });
+                    // isAiSpeakingRef is already true, so VAD is blocked.
+
+                    welcomeAudio.onended = () => {
+                        setIsAiSpeaking(false);
+                        isAiSpeakingRef.current = false;
+                        console.log("Welcome Audio Finished - VAD Unblocked");
+                    };
+
+                    welcomeAudio.play().catch(e => {
+                        console.error("Auto-play blocked:", e);
+                        setIsAiSpeaking(false);
+                        isAiSpeakingRef.current = false;
+                    });
+
+                }, 2000);
+
             } else {
                 // Normal entry (already passed welcome)
                 if (!isMicInitialized.current) {
@@ -562,8 +579,12 @@ function ChatInterface() {
             const stream = await navigator.mediaDevices.getUserMedia(constraints);
             streamRef.current = stream;
 
-            const audioContext = new (window.AudioContext || (window as any).webkitAudioContext)();
-            audioContextRef.current = audioContext;
+            // USE SHARED CONTEXT
+            if (!mainAudioContextRef.current) {
+                mainAudioContextRef.current = new (window.AudioContext || (window as any).webkitAudioContext)();
+            }
+            const audioContext = mainAudioContextRef.current;
+            if (audioContext.state === 'suspended') await audioContext.resume();
 
             const source = audioContext.createMediaStreamSource(stream);
 
@@ -668,8 +689,9 @@ function ChatInterface() {
         if (modeRef.current === 'voice' && !isAiSpeakingRef.current) {
 
             // Thresholds
-            const START_THRESHOLD = 15;
-            const STOP_THRESHOLD = 5;
+            // Thresholds (Increased for Mobile Resilience with 4x Gain)
+            const START_THRESHOLD = 20; // Harder to start (was 15)
+            const STOP_THRESHOLD = 10;   // Easier to stop (was 5)
             const SILENCE_LIMIT = 1500; // 1.5s
 
             if (!isRecordingRef.current) {
@@ -716,7 +738,7 @@ function ChatInterface() {
         if (buffer.length === 0) return;
 
         // Flatten and Send
-        if (audioContextRef.current) {
+        if (mainAudioContextRef.current) {
             const totalLength = buffer.reduce((acc, c) => acc + c.length, 0);
             const merged = new Float32Array(totalLength);
             let offset = 0;
@@ -725,19 +747,18 @@ function ChatInterface() {
             // No normalizeAudio needed because Gain Node 4x is already applied in graph
             // and we want dynamics.
 
-            const wavBlob = encodeWAV(merged, audioContextRef.current.sampleRate);
+            const wavBlob = encodeWAV(merged, mainAudioContextRef.current.sampleRate);
             await sendAudioToN8N(wavBlob);
         }
     };
 
-    // Stub for cleanup if component unmounts
     useEffect(() => {
         return () => {
             if (streamRef.current) {
                 streamRef.current.getTracks().forEach(track => track.stop());
             }
-            if (audioContextRef.current) {
-                audioContextRef.current.close();
+            if (mainAudioContextRef.current) {
+                mainAudioContextRef.current.close();
             }
             if (animationFrameRef.current) {
                 cancelAnimationFrame(animationFrameRef.current);
@@ -999,22 +1020,36 @@ function ChatInterface() {
                             </button>
                         </div>
                     ) : (
-                        <div className="flex flex-col items-center justify-center py-6 gap-6">
+                        <div className="flex flex-col items-center justify-center py-6 gap-6 relative">
+                            {/* STATUS TEXT */}
+                            <p className="text-slate-400 font-mono text-xs tracking-widest uppercase">
+                                {isConnecting ? <span className="text-emerald-400 animate-pulse">Connessione in corso...</span> :
+                                    isAiSpeaking ? <span className="text-blue-400 animate-pulse">● Valentina sta parlando...</span> :
+                                        isRecording ? (
+                                            isSpeechDetected ?
+                                                <span className="text-emerald-400 animate-pulse font-bold">● Voce Rilevata...</span> :
+                                                <span className="text-amber-400 animate-pulse">● In attesa di voce...</span>
+                                        ) :
+                                            ""}
+                            </p>
+
+                            {/* MAIN BUTTON (NON-CLICKABLE AS PER REQUEST) */}
                             <button
-                                onClick={() => setMode('text')} // Hangup button / Exit voice mode
-                                disabled={isAiSpeaking}
+                                disabled={true} // Visual only
                                 className={cn(
-                                    "w-24 h-24 rounded-full flex items-center justify-center transition-all duration-300 relative group",
-                                    isRecording ? "bg-red-500/20" : isAiSpeaking ? "bg-slate-600/20 cursor-not-allowed" : "bg-blue-600/20"
+                                    "w-24 h-24 rounded-full flex items-center justify-center transition-all duration-300 relative group cursor-default",
+                                    isConnecting ? "bg-emerald-500/20" :
+                                        isRecording ? "bg-red-500/20" : isAiSpeaking ? "bg-slate-600/20" : "bg-blue-600/20"
                                 )}
                             >
                                 <div className={cn("absolute inset-0 rounded-full border-2 opacity-50 scale-110",
-                                    isRecording ? "border-red-500 animate-[ping_1.5s_infinite]" :
-                                        isAiSpeaking ? "border-slate-500" : "border-blue-500"
+                                    isConnecting ? "border-emerald-500 animate-[ping_1.5s_infinite]" :
+                                        isRecording ? "border-red-500 animate-[ping_1.5s_infinite]" :
+                                            isAiSpeaking ? "border-slate-500" : "border-blue-500"
                                 )} />
 
                                 {/* Visualizer Ring based on volume (only active when user is recording/speaking) */}
-                                {isRecording && !isAiSpeaking && (
+                                {isRecording && !isAiSpeaking && !isConnecting && (
                                     <div
                                         className="absolute inset-0 rounded-full border-[3px] border-red-400 opacity-80"
                                         style={{ transform: `scale(${1 + audioVolume / 50})`, transition: 'transform 0.1s ease-out' }}
@@ -1022,22 +1057,33 @@ function ChatInterface() {
                                 )}
 
                                 <div className={cn("w-16 h-16 rounded-full flex items-center justify-center shadow-lg transition-all",
-                                    isRecording ? "bg-red-500 shadow-red-500/40 scale-90" :
-                                        isAiSpeaking ? "bg-slate-600 shadow-slate-600/40" : "bg-blue-500 shadow-blue-500/40 group-hover:scale-110"
+                                    isConnecting ? "bg-emerald-500 shadow-emerald-500/40" :
+                                        isRecording ? "bg-red-500 shadow-red-500/40 scale-90" :
+                                            isAiSpeaking ? "bg-slate-600 shadow-slate-600/40" : "bg-blue-500 shadow-blue-500/40"
                                 )}>
-                                    {isRecording ? <Square className="fill-white text-white" size={24} /> :
-                                        isAiSpeaking ? <Volume2 className="text-white animate-pulse" size={32} /> :
-                                            <Mic className="text-white" size={32} />}
+                                    {isConnecting ? (
+                                        <motion.div
+                                            animate={{
+                                                rotate: [-5, 5, -5, 5, 0],
+                                            }}
+                                            transition={{
+                                                duration: 0.5,
+                                                repeat: Infinity,
+                                                repeatType: "loop",
+                                                ease: "linear"
+                                            }}
+                                        >
+                                            <Phone className="text-white fill-white" size={32} />
+                                        </motion.div>
+                                    ) :
+                                        isRecording ? <Mic className="text-white" size={32} /> :
+                                            isAiSpeaking ? <Volume2 className="text-white animate-pulse" size={32} /> :
+                                                <Mic className="text-white" size={32} />}
                                 </div>
                             </button>
-                            <p className="text-slate-400 font-mono text-xs tracking-widest uppercase">
-                                {isAiSpeaking ? <span className="text-blue-400 animate-pulse">● AI Speaking...</span> :
-                                    isRecording ? (
-                                        isSpeechDetected ?
-                                            <span className="text-emerald-400 animate-pulse font-bold">● Voce Rilevata...</span> :
-                                            <span className="text-amber-400 animate-pulse">● In attesa di voce...</span>
-                                    ) :
-                                        "Press to call"}
+
+                            <p className="text-slate-500 font-bold text-sm tracking-widest uppercase">
+                                PARLA CON VALENTINA
                             </p>
                         </div>
                     )}

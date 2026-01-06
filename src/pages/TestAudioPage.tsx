@@ -220,12 +220,13 @@ export default function TestAudioPage() {
 
         if (isListeningRef.current) {
             // Signal is 4x boosted now, so threshold might be higher.
-            const THRESHOLD = 15;
+            const START_THRESHOLD = 20; // Harder to start (was 15)
+            const STOP_THRESHOLD = 10;   // Easier to stop (was 5)
             const SILENCE_LIMIT = 1500;
 
             if (!isSpeechActiveRef.current) {
                 // WAITING FOR SPEECH
-                if (avg > THRESHOLD) {
+                if (avg > START_THRESHOLD) {
                     isSpeechActiveRef.current = true;
                     setIsRecording(true);
                     speechStartTimeRef.current = Date.now();
@@ -235,7 +236,7 @@ export default function TestAudioPage() {
                 }
             } else {
                 // RECORDING
-                if (avg < 5) { // Silence Threshold
+                if (avg < STOP_THRESHOLD) { // Silence Threshold
                     if (!silenceStartRef.current) silenceStartRef.current = Date.now();
                     else if (Date.now() - silenceStartRef.current > SILENCE_LIMIT) {
                         stopAndReset();
