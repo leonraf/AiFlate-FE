@@ -4,6 +4,7 @@ import { Link } from 'react-router-dom';
 import { motion } from 'framer-motion';
 import { cn } from '../lib/utils';
 import { encodeWAV } from '../lib/audio';
+import { getAudioConstraints, getVADThresholds, createAudioProcessor } from '../lib/audioConfig';
 import { Mic, Square, Activity } from 'lucide-react';
 
 export default function TestAudioPage() {
@@ -38,82 +39,29 @@ export default function TestAudioPage() {
     useEffect(() => {
         const initMicrophone = async () => {
             try {
-                const isMobile = /iPhone|iPad|iPod|Android/i.test(navigator.userAgent);
-                setStatus(`Attivazione Mic (${isMobile ? 'Mobile DSP' : 'Desktop HQ'})...`);
+                // CHANGED: Use centralized config
+                const constraints = getAudioConstraints();
 
-                const constraints = {
-                    audio: {
-                        autoGainControl: isMobile,
-                        echoCancellation: isMobile,
-                        noiseSuppression: isMobile,
-                        channelCount: 1,
-                        sampleRate: 48000,
-                        // If desktop, force raw audio
-                        ...(isMobile ? {} : {
-                            googAutoGainControl: false, googNoiseSuppression: false, googHighpassFilter: false,
-                            mozAutoGainControl: false, mozNoiseSuppression: false,
-                        })
-                    }
-                } as MediaStreamConstraints["audio"];
+                // We don't need isMobile for status anymore if we want to be generic, 
+                // but let's keep it if we want to show the mode. 
+                // Or just:
+                setStatus(`Attivazione Mic...`);
 
-                const stream = await navigator.mediaDevices.getUserMedia({ audio: constraints });
+                const stream = await navigator.mediaDevices.getUserMedia(constraints);
                 streamRef.current = stream;
 
                 const audioContext = new (window.AudioContext || (window as any).webkitAudioContext)();
                 audioContextRef.current = audioContext;
                 const source = audioContext.createMediaStreamSource(stream);
 
-                // --- VOCAL CHAIN OPTIMIZATION (ANTI-BOOM / CLARITY) ---
-
-                // 1. High Pass Filter (150Hz) - Aggressive Cut for Boomy/Plosive starts
-                const hpf = audioContext.createBiquadFilter();
-                hpf.type = 'highpass';
-                hpf.frequency.value = 150;
-
-                // 2. Low Shelf (200Hz, -5dB) - Thin out the "mud" / Proximity Effect
-                const lowShelf = audioContext.createBiquadFilter();
-                lowShelf.type = 'lowshelf';
-                lowShelf.frequency.value = 200;
-                lowShelf.gain.value = -5.0;
-
-                // 3. Presence Boost (3.5kHz) - Intelligibility
-                const presence = audioContext.createBiquadFilter();
-                presence.type = 'peaking';
-                presence.frequency.value = 3500;
-                presence.Q.value = 0.8;
-                presence.gain.value = 5.0;
-
-                // 4. High Shelf (10kHz) - Air
-                const highShelf = audioContext.createBiquadFilter();
-                highShelf.type = 'highshelf';
-                highShelf.frequency.value = 10000;
-                highShelf.gain.value = 3.0;
-
-                // 5. Compression (Dynamic Control)
-                const compressor = audioContext.createDynamicsCompressor();
-                compressor.threshold.value = -24;
-                compressor.knee.value = 30;
-                compressor.ratio.value = 12;
-                compressor.attack.value = 0.003;
-                compressor.release.value = 0.25;
-
-                // 6. Adaptive Gain
-                // Mobile: 2.0x (DSP active). Desktop: 4.0x (Raw).
-                const GAIN_VALUE = isMobile ? 2.0 : 4.0;
-
-                const gainNode = audioContext.createGain();
-                gainNode.gain.value = GAIN_VALUE;
+                // --- VOCAL CHAIN OPTIMIZATION (CENTRALIZED) ---
+                const processor = createAudioProcessor(audioContext);
 
                 // CONNECT THE CHAIN
-                source.connect(hpf);
-                hpf.connect(lowShelf);
-                lowShelf.connect(presence);
-                presence.connect(highShelf);
-                highShelf.connect(compressor);
-                compressor.connect(gainNode);
+                source.connect(processor.input);
 
                 // The output of GainNode is our "Processed Audio"
-                const processedOutput = gainNode;
+                const processedOutput = processor.output;
 
                 // -----------------------------
 
@@ -144,7 +92,7 @@ export default function TestAudioPage() {
                 };
 
                 setIsMicReady(true);
-                setStatus(`Mic Ottimizzato (${isMobile ? 'Mobile Mode' : 'Desktop Mode'})`);
+                setStatus(`Mic Ottimizzato (Ready)`);
                 detectSilence();
 
             } catch (err) {
@@ -225,13 +173,9 @@ export default function TestAudioPage() {
 
         if (isListeningRef.current) {
             // Adaptive Thresholds
-            const isMobile = /iPhone|iPad|iPod|Android/i.test(navigator.userAgent);
 
-            // Mobile: Low Gain (1.1x) + Higher Thresh (35)
-            // Desktop: High Gain (4.0x) + Medium Thresh (25)
-            const START_THRESHOLD = isMobile ? 35 : 25;
-            const STOP_THRESHOLD = 10;
-            const SILENCE_LIMIT = 1500;
+            // Adaptive Thresholds (Centralized)
+            const { start: START_THRESHOLD, stop: STOP_THRESHOLD, silenceLimit: SILENCE_LIMIT } = getVADThresholds();
 
             if (!isSpeechActiveRef.current) {
                 // WAITING FOR SPEECH

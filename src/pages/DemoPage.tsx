@@ -4,6 +4,7 @@ import { Link } from 'react-router-dom';
 import { motion } from 'framer-motion';
 import { cn } from '../lib/utils';
 import { encodeWAV } from '../lib/audio';
+import { getAudioConstraints, getVADThresholds, createAudioProcessor } from '../lib/audioConfig';
 
 // CREDENZIALI DEMO
 const DEMO_USER = "aiflate_demo";
@@ -566,25 +567,8 @@ function ChatInterface() {
         try {
             console.log("Initializing Hot Mic Chain...");
 
-            // ADAPTIVE CONSTRAINTS
-            // Mobile: Enable DSP (Echo/Noise Cancellation) to handle noisy environments.
-            // Desktop: Disable DSP (High Fidelity) for best quality.
-            const isMobile = /iPhone|iPad|iPod|Android/i.test(navigator.userAgent);
-
-            const constraints = {
-                audio: {
-                    autoGainControl: isMobile,
-                    echoCancellation: isMobile,
-                    noiseSuppression: isMobile,
-                    channelCount: 1,
-                    sampleRate: 48000,
-                    // If desktop, force raw audio
-                    ...(isMobile ? {} : {
-                        googAutoGainControl: false, googNoiseSuppression: false, googHighpassFilter: false,
-                        mozAutoGainControl: false, mozNoiseSuppression: false,
-                    })
-                }
-            } as MediaStreamConstraints;
+            // ADAPTIVE CONSTRAINTS (Centralized)
+            const constraints = getAudioConstraints();
 
             const stream = await navigator.mediaDevices.getUserMedia(constraints);
             streamRef.current = stream;
@@ -598,46 +582,16 @@ function ChatInterface() {
 
             const source = audioContext.createMediaStreamSource(stream);
 
-            // --- STUDIO VOCAL CHAIN (ANTI-BOOM) ---
-            // 1. HPF 150Hz (Cut rumble/plosives)
-            const hpf = audioContext.createBiquadFilter();
-            hpf.type = 'highpass'; hpf.frequency.value = 150;
+            // --- STUDIO VOCAL CHAIN (CENTRALIZED) ---
+            const processor = createAudioProcessor(audioContext);
+            gainNodeRef.current = processor.gainNode;
 
-            // 2. Low Shelf 200Hz -5dB (Thin out mud/proximity)
-            const lowShelf = audioContext.createBiquadFilter();
-            lowShelf.type = 'lowshelf'; lowShelf.frequency.value = 200; lowShelf.gain.value = -5.0;
-
-            // 3. Presence 3.5kHz +5dB (Clarity)
-            const presence = audioContext.createBiquadFilter();
-            presence.type = 'peaking'; presence.frequency.value = 3500; presence.Q.value = 0.8; presence.gain.value = 5.0;
-
-            // 4. High Shelf 10kHz +3dB (Air)
-            const highShelf = audioContext.createBiquadFilter();
-            highShelf.type = 'highshelf'; highShelf.frequency.value = 10000; highShelf.gain.value = 3.0;
-
-            // 5. Compressor (Control dynamics)
-            const compressor = audioContext.createDynamicsCompressor();
-            compressor.threshold.value = -24; compressor.knee.value = 30; compressor.ratio.value = 12;
-            compressor.attack.value = 0.003; compressor.release.value = 0.25;
-
-            // 6. Adaptive Gain (4.0x for Desktop, 2.5x for Mobile)
-            const GAIN_VALUE = isMobile ? 2.0 : 4.0;
-
-            const gainNode = audioContext.createGain();
-            gainNode.gain.value = GAIN_VALUE;
-            gainNodeRef.current = gainNode;
-
-            console.log(`Audio Config: Mobile=${isMobile}, Gain=${GAIN_VALUE}`);
+            console.log(`Audio Config: Processor Initialized`);
 
             // CHAIN CONNECTION
-            source.connect(hpf);
-            hpf.connect(lowShelf);
-            lowShelf.connect(presence);
-            presence.connect(highShelf);
-            highShelf.connect(compressor);
-            compressor.connect(gainNode);
+            source.connect(processor.input);
 
-            const processedOutput = gainNode;
+            const processedOutput = processor.output;
 
             // --- FAN-OUT GRAPH ---
 
@@ -700,16 +654,11 @@ function ChatInterface() {
         setAudioVolume(avg); // Update UI Volume
 
         // Logic only if in Voice Mode and AI not speaking
+        // Logic only if in Voice Mode and AI not speaking
         if (modeRef.current === 'voice' && !isAiSpeakingRef.current) {
 
-            // Adaptive Thresholds
-            const isMobile = /iPhone|iPad|iPod|Android/i.test(navigator.userAgent);
-
-            // Mobile (DSP On): Clean signal, so we can use standard thresholds (20).
-            // Desktop (DSP Off): High sensitivity, thresholds (25).
-            const START_THRESHOLD = isMobile ? 20 : 25;
-            const STOP_THRESHOLD = 10;
-            const SILENCE_LIMIT = 1500;
+            // Adaptive Thresholds (Centralized)
+            const { start: START_THRESHOLD, stop: STOP_THRESHOLD, silenceLimit: SILENCE_LIMIT } = getVADThresholds();
 
             if (!isRecordingRef.current) {
                 // WAITING STATE
