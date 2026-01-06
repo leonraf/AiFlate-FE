@@ -40,7 +40,10 @@ function LoginForm({ onLogin }: { onLogin: () => void }) {
         e.preventDefault();
         setLoading(true);
         setTimeout(() => {
-            if (user === DEMO_USER && pass === DEMO_PASS) {
+            const isValidMain = user === DEMO_USER && pass === DEMO_PASS;
+            const isValidSimple = user === "demo" && pass === "test";
+
+            if (isValidMain || isValidSimple) {
                 onLogin();
             } else {
                 setError("Credenziali non valide. Riprova.");
