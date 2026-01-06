@@ -612,7 +612,7 @@ function ChatInterface() {
 
             // 6. Adaptive Gain (4.0x for Desktop, 2.5x for Mobile)
             const isMobile = /iPhone|iPad|iPod|Android/i.test(navigator.userAgent);
-            const GAIN_VALUE = isMobile ? 2.5 : 4.0;
+            const GAIN_VALUE = isMobile ? 1.1 : 4.0;
 
             const gainNode = audioContext.createGain();
             gainNode.gain.value = GAIN_VALUE;
@@ -696,9 +696,9 @@ function ChatInterface() {
             // Adaptive Thresholds
             const isMobile = /iPhone|iPad|iPod|Android/i.test(navigator.userAgent);
 
-            // Mobile: Lower gain (2.5x) but closer mic -> Threshold 20
-            // Desktop: Higher gain (4.0x) but distant mic -> Threshold 25
-            const START_THRESHOLD = isMobile ? 20 : 25;
+            // Mobile: Lower gain (1.1x) + Higher Thresh (35)
+            // Desktop: Higher gain (4.0x) + Medium Thresh (25)
+            const START_THRESHOLD = isMobile ? 35 : 25;
             const STOP_THRESHOLD = 10;
             const SILENCE_LIMIT = 1500;
 

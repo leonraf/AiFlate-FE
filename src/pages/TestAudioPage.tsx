@@ -97,7 +97,7 @@ export default function TestAudioPage() {
 
                 // 6. Adaptive Gain
                 const isMobile = /iPhone|iPad|iPod|Android/i.test(navigator.userAgent);
-                const GAIN_VALUE = isMobile ? 2.5 : 4.0;
+                const GAIN_VALUE = isMobile ? 1.1 : 4.0;
 
                 const gainNode = audioContext.createGain();
                 gainNode.gain.value = GAIN_VALUE;
@@ -224,7 +224,10 @@ export default function TestAudioPage() {
         if (isListeningRef.current) {
             // Adaptive Thresholds
             const isMobile = /iPhone|iPad|iPod|Android/i.test(navigator.userAgent);
-            const START_THRESHOLD = isMobile ? 20 : 25;
+
+            // Mobile: Low Gain (1.1x) + Higher Thresh (35)
+            // Desktop: High Gain (4.0x) + Medium Thresh (25)
+            const START_THRESHOLD = isMobile ? 35 : 25;
             const STOP_THRESHOLD = 10;
             const SILENCE_LIMIT = 1500;
 
