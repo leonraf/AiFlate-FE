@@ -307,84 +307,112 @@ function ChatInterface() {
     const modeRef = useRef<'text' | 'voice'>('text');
     const messagesRef = useRef<Message[]>(messages); // Ref to hold latest messages for async callbacks
 
-    useEffect(() => {
-        // Connect to WebSocket on mount
-        const connectWS = () => {
-            const ws = new WebSocket('wss://cartesia-stream-production.up.railway.app');
-            wsRef.current = ws;
+    // --- WEBSOCKET HANDLER & RECONNECTION LOGIC ---
 
-            ws.onopen = () => console.log('Connected to Cartesia Stream WS');
+    const handleWsMessage = async (event: MessageEvent) => {
+        try {
+            const msg = JSON.parse(event.data);
 
-            ws.onmessage = async (event) => {
-                try {
-                    const msg = JSON.parse(event.data);
+            if (msg.type === 'session_start') {
+                console.log('Session ID:', msg.sessionId);
+                setSessionId(msg.sessionId);
+                sessionIdRef.current = msg.sessionId;
+            }
+            else if (msg.type === 'tts_start') {
+                setIsAiSpeaking(true);
+                isAiSpeakingRef.current = true;
 
-                    if (msg.type === 'session_start') {
-                        console.log('Session ID:', msg.sessionId);
-                        setSessionId(msg.sessionId);
-                        sessionIdRef.current = msg.sessionId;
-                    }
-                    else if (msg.type === 'tts_start') {
-                        setIsAiSpeaking(true);
-                        isAiSpeakingRef.current = true;
+                // Reset stream state
+                isFirstChunkRef.current = true;
+                audioResidueRef.current = null;
 
-                        // Reset stream state
-                        isFirstChunkRef.current = true;
-                        audioResidueRef.current = null;
+                // Reset Jitter Buffer
+                playbackQueueRef.current = [];
+                hasStartedPlayingRef.current = false;
+                nextStartTimeRef.current = mainAudioContextRef.current?.currentTime || 0;
 
-                        // Reset Jitter Buffer
-                        // Reset Jitter Buffer
-                        playbackQueueRef.current = [];
-                        hasStartedPlayingRef.current = false;
-                        nextStartTimeRef.current = mainAudioContextRef.current?.currentTime || 0;
-
-                        // Initialize context if needed
-                        if (!mainAudioContextRef.current) {
-                            mainAudioContextRef.current = new (window.AudioContext || (window as any).webkitAudioContext)();
-                        }
-                        // Reset scheduler time to now (or slightly future)
-                        if (mainAudioContextRef.current.state === 'suspended') {
-                            await mainAudioContextRef.current.resume();
-                        }
-                        nextStartTimeRef.current = mainAudioContextRef.current.currentTime + 0.1; // small buffer
-                    }
-                    else if (msg.type === 'audio_chunk') {
-                        await scheduleAudioChunk(msg.data);
-                    }
-                    else if (msg.type === 'tts_end') {
-                        // We wait for the last chunk to finish playing based on timing
-                        const ctx = mainAudioContextRef.current;
-                        if (ctx) {
-                            const remainingTime = nextStartTimeRef.current - ctx.currentTime;
-                            setTimeout(() => {
-                                setIsAiSpeaking(false);
-                                isAiSpeakingRef.current = false;
-
-                                // Handle potential continuous flow restart here if NOT endConversation
-                                // We don't need to explicitly "startRecording" because VAD is always scanning
-                                // as long as isAiSpeaking is false.
-                            }, Math.max(0, remainingTime * 1000));
-                        } else {
-                            setIsAiSpeaking(false);
-                        }
-                    }
-                } catch (e) {
-                    console.error("WS Message Error:", e);
+                // Initialize context if needed
+                if (!mainAudioContextRef.current) {
+                    mainAudioContextRef.current = new (window.AudioContext || (window as any).webkitAudioContext)();
                 }
-            };
+                // Resume logic
+                if (mainAudioContextRef.current.state === 'suspended') {
+                    await mainAudioContextRef.current.resume();
+                }
+                nextStartTimeRef.current = mainAudioContextRef.current.currentTime + 0.1; // small buffer
+            }
+            else if (msg.type === 'audio_chunk') {
+                await scheduleAudioChunk(msg.data);
+            }
+            else if (msg.type === 'tts_end') {
+                const ctx = mainAudioContextRef.current;
+                if (ctx) {
+                    const remainingTime = nextStartTimeRef.current - ctx.currentTime;
+                    setTimeout(() => {
+                        setIsAiSpeaking(false);
+                        isAiSpeakingRef.current = false;
+                    }, Math.max(0, remainingTime * 1000));
+                } else {
+                    setIsAiSpeaking(false);
+                }
+            }
+        } catch (e) {
+            console.error("WS Message Error:", e);
+        }
+    };
 
-            ws.onerror = (e) => console.error("WS Error:", e);
-            ws.onclose = () => console.log("WS Closed");
+    const connectWebSocket = () => {
+        // If already connected/connecting, don't spam
+        if (wsRef.current?.readyState === WebSocket.OPEN || wsRef.current?.readyState === WebSocket.CONNECTING) {
+            return;
+        }
+
+        console.log("Connecting/Reconnecting to WS...");
+        const ws = new WebSocket('wss://cartesia-stream-production.up.railway.app');
+        wsRef.current = ws;
+
+        ws.onopen = () => console.log('Connected to Cartesia Stream WS');
+        ws.onmessage = handleWsMessage;
+        ws.onerror = (e) => console.error("WS Error:", e);
+        ws.onclose = () => {
+            console.log("WS Closed");
+            sessionIdRef.current = null; // Invalidate session
         };
+    };
 
-        connectWS();
+    // Ensure we have a valid session before acting
+    const validateSession = async (): Promise<string> => {
+        // 1. If valid, return immediately
+        if (wsRef.current?.readyState === WebSocket.OPEN && sessionIdRef.current) {
+            return sessionIdRef.current;
+        }
+
+        // 2. Trigger connection if dead
+        connectWebSocket();
+
+        // 3. Wait for session_start
+        return new Promise((resolve, reject) => {
+            let attempts = 0;
+            const interval = setInterval(() => {
+                attempts++;
+                if (wsRef.current?.readyState === WebSocket.OPEN && sessionIdRef.current) {
+                    clearInterval(interval);
+                    resolve(sessionIdRef.current);
+                }
+                // Timeout after 5s
+                if (attempts > 50) {
+                    clearInterval(interval);
+                    reject(new Error("Timeout waiting for Session ID recovery"));
+                }
+            }, 100);
+        });
+    };
+
+    useEffect(() => {
+        connectWebSocket();
 
         return () => {
             wsRef.current?.close();
-            // Do NOT close mainAudioContextRef here loosely, or handle carefully
-            // Actually, we should probably let the component unmount cleanup handle it later?
-            // But this useEffect is on [] (mount), so it runs on unmount.
-            // Yes, close it.
             if (mainAudioContextRef.current) mainAudioContextRef.current.close();
         };
     }, []);
@@ -765,6 +793,16 @@ function ChatInterface() {
         setMessages(prev => [...prev, userMsg]);
 
         try {
+            // --- VALIDATE SESSION BEFORE SENDING ---
+            let activeSessionId = sessionIdRef.current;
+            try {
+                activeSessionId = await validateSession();
+                console.log("Session Validated:", activeSessionId);
+            } catch (validationErr) {
+                console.error("Session Validation Failed:", validationErr);
+                throw new Error("Impossibile connettersi al servizio voce. Riprova.");
+            }
+
             const formData = new FormData();
             formData.append('file', audioBlob, 'recording.wav');
 
@@ -777,8 +815,8 @@ function ChatInterface() {
             formData.append('messages', JSON.stringify(historyPayload));
 
             // Add Session ID from WebSocket (Use Ref to avoid stale closure)
-            if (sessionIdRef.current) {
-                formData.append('sessionId', sessionIdRef.current);
+            if (activeSessionId) {
+                formData.append('sessionId', activeSessionId);
             }
 
             const response = await fetch(N8N_VOICE_URL, {
