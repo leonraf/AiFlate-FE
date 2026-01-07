@@ -683,7 +683,6 @@ function ChatInterface() {
         setAudioVolume(avg); // Update UI Volume
 
         // Logic only if in Voice Mode and AI not speaking
-        // Logic only if in Voice Mode and AI not speaking
         if (modeRef.current === 'voice' && !isAiSpeakingRef.current) {
 
             // Adaptive Thresholds (Centralized)
@@ -718,396 +717,394 @@ function ChatInterface() {
 
                 if (avg < STOP_THRESHOLD) {
                     // Potential Silence
-                    if (avg < STOP_THRESHOLD) {
-                        // Potential Silence
-                        if (!silenceStartRef.current) {
-                            silenceStartRef.current = Date.now();
-                        } else if (Date.now() - silenceStartRef.current > SILENCE_LIMIT) {
-                            // STOP RECORDING
-                            console.log("VAD: Speech Stop");
-                            stopAndSend();
-                        }
-                    } else {
-                        silenceStartRef.current = null;
+                    if (!silenceStartRef.current) {
+                        silenceStartRef.current = Date.now();
+                    } else if (Date.now() - silenceStartRef.current > SILENCE_LIMIT) {
+                        // STOP RECORDING
+                        console.log("VAD: Speech Stop");
+                        stopAndSend();
                     }
+                } else {
+                    silenceStartRef.current = null;
                 }
             }
+        } // End if (mode === voice)
 
-            animationFrameRef.current = requestAnimationFrame(detectSilenceLoop);
-        };
+        animationFrameRef.current = requestAnimationFrame(detectSilenceLoop);
+    };
 
-        const stopAndSend = async () => {
-            isRecordingRef.current = false;
-            setIsRecording(false);
-            setIsSpeechDetected(false); // Reset UI
+    const stopAndSend = async () => {
+        isRecordingRef.current = false;
+        setIsRecording(false);
+        setIsSpeechDetected(false); // Reset UI
 
-            const buffer = mainBufferRef.current;
-            mainBufferRef.current = []; // Clear main buffer
+        const buffer = mainBufferRef.current;
+        mainBufferRef.current = []; // Clear main buffer
 
-            if (buffer.length === 0) return;
+        if (buffer.length === 0) return;
 
-            // Flatten and Send
+        // Flatten and Send
+        if (mainAudioContextRef.current) {
+            const totalLength = buffer.reduce((acc, c) => acc + c.length, 0);
+            const merged = new Float32Array(totalLength);
+            let offset = 0;
+            for (const c of buffer) { merged.set(c, offset); offset += c.length; }
+
+            // No normalizeAudio needed because Gain Node 4x is already applied in graph
+            // and we want dynamics.
+
+            const wavBlob = encodeWAV(merged, mainAudioContextRef.current.sampleRate);
+            await sendAudioToN8N(wavBlob);
+        }
+    };
+
+    useEffect(() => {
+        return () => {
+            if (streamRef.current) {
+                streamRef.current.getTracks().forEach(track => track.stop());
+            }
             if (mainAudioContextRef.current) {
-                const totalLength = buffer.reduce((acc, c) => acc + c.length, 0);
-                const merged = new Float32Array(totalLength);
-                let offset = 0;
-                for (const c of buffer) { merged.set(c, offset); offset += c.length; }
-
-                // No normalizeAudio needed because Gain Node 4x is already applied in graph
-                // and we want dynamics.
-
-                const wavBlob = encodeWAV(merged, mainAudioContextRef.current.sampleRate);
-                await sendAudioToN8N(wavBlob);
+                mainAudioContextRef.current.close();
+            }
+            if (animationFrameRef.current) {
+                cancelAnimationFrame(animationFrameRef.current);
             }
         };
+    }, []);
 
-        useEffect(() => {
-            return () => {
-                if (streamRef.current) {
-                    streamRef.current.getTracks().forEach(track => track.stop());
-                }
-                if (mainAudioContextRef.current) {
-                    mainAudioContextRef.current.close();
-                }
-                if (animationFrameRef.current) {
-                    cancelAnimationFrame(animationFrameRef.current);
-                }
-            };
-        }, []);
+    // Helper for smooth playback
+    const playAudioResponse = async (url: string) => {
+        try {
+            const audioCtx = new (window.AudioContext || (window as any).webkitAudioContext)();
+            const response = await fetch(url);
+            const arrayBuffer = await response.arrayBuffer();
+            const audioBuffer = await audioCtx.decodeAudioData(arrayBuffer);
 
-        // Helper for smooth playback
-        const playAudioResponse = async (url: string) => {
-            try {
-                const audioCtx = new (window.AudioContext || (window as any).webkitAudioContext)();
-                const response = await fetch(url);
-                const arrayBuffer = await response.arrayBuffer();
-                const audioBuffer = await audioCtx.decodeAudioData(arrayBuffer);
+            const source = audioCtx.createBufferSource();
+            source.buffer = audioBuffer;
+            source.connect(audioCtx.destination);
+            source.start(0);
 
-                const source = audioCtx.createBufferSource();
-                source.buffer = audioBuffer;
-                source.connect(audioCtx.destination);
-                source.start(0);
-
-                return new Promise<void>((resolve) => {
-                    source.onended = () => {
-                        resolve();
-                        audioCtx.close();
-                    };
-                });
-            } catch (e) {
-                console.error("Audio Playback Error", e);
-            }
-        };
-
-
-        const sendAudioToN8N = async (audioBlob: Blob) => {
-            setIsLoading(true);
-
-            const tempId = Date.now().toString();
-            const userMsg: Message = { id: tempId, role: 'user', content: 'Elaborazione audio...', audioUrl: 'blob' };
-            setMessages(prev => [...prev, userMsg]);
-
-            try {
-                // --- VALIDATE SESSION BEFORE SENDING ---
-                let activeSessionId = sessionIdRef.current;
-                try {
-                    activeSessionId = await validateSession();
-                    console.log("Session Validated:", activeSessionId);
-                } catch (validationErr) {
-                    console.error("Session Validation Failed:", validationErr);
-                    throw new Error("Impossibile connettersi al servizio voce. Riprova.");
-                }
-
-                const formData = new FormData();
-                formData.append('file', audioBlob, 'recording.wav');
-
-                // Prepare payload with full history
-                // Use Ref to ensure we have the absolute latest messages, escaping any stale closures
-                const historyPayload = messagesRef.current.map(({ role, content }) => ({ role, content }));
-
-                // UPDATE: N8N didn't auto-parse "deep" brackets. 
-                // Turning back to standard JSON string in body. User will Parse JSON in N8N.
-                formData.append('messages', JSON.stringify(historyPayload));
-
-                // Add Session ID from WebSocket (Use Ref to avoid stale closure)
-                if (activeSessionId) {
-                    formData.append('sessionId', activeSessionId);
-                }
-
-                const response = await fetch(N8N_VOICE_URL, {
-                    method: 'POST',
-                    body: formData
-                });
-
-                if (!response.ok) throw new Error('Network response was not ok');
-
-                const data = await response.json();
-                console.log("N8N Voice Response:", data);
-
-                // Structure: [{ success: true, data: { transcription, message_text, audio_base64, ... } }]
-                const resultData = Array.isArray(data) ? data[0]?.data : data?.data;
-
-                if (!resultData) {
-                    throw new Error("Invalid N8N voice response format");
-                }
-
-                const { message_text, transcription, endConversation } = resultData;
-
-                // UPDATE USER MESSAGE WITH TRANSCRIPTION
-                setMessages(prev => prev.map(msg =>
-                    msg.id === tempId
-                        ? { ...msg, content: transcription || "Messaggio vocale" }
-                        : msg
-                ));
-
-                // Just add the text prompt. The Audio will come via WS.
-                const aiMsg: Message = {
-                    id: Date.now().toString(),
-                    role: 'assistant',
-                    content: message_text || 'Risposta Vocale (Streaming)',
-                    // No audioUrl, or we can use a dummy one if UI needs it for visualizer
+            return new Promise<void>((resolve) => {
+                source.onended = () => {
+                    resolve();
+                    audioCtx.close();
                 };
-                setMessages(prev => [...prev, aiMsg]);
+            });
+        } catch (e) {
+            console.error("Audio Playback Error", e);
+        }
+    };
 
-                // NOTE: We do NOT play audio here anymore. The WS handles 'tts_start' -> 'audio_chunk' -> events.
-                // But we do handle flow control (endConversation logic)
 
-                if (endConversation) {
-                    // If ends, we switch to text mode. 
-                    // We should technically wait for audio to finish?
-                    // But the WS 'tts_end' handler handles the resume logic.
-                    // We'll set a flag or just force switch.
-                    // Optimally we wait.
+    const sendAudioToN8N = async (audioBlob: Blob) => {
+        setIsLoading(true);
 
-                    // Let's set mode to text immediately to prevent *sending* more audio,
-                    // but we let the current audio finish playing.
-                    setMode('text');
-                }
-                // If NOT endConversation, the WS 'tts_end' event will trigger startRecording()
-                // because mode is still 'voice'.
+        const tempId = Date.now().toString();
+        const userMsg: Message = { id: tempId, role: 'user', content: 'Elaborazione audio...', audioUrl: 'blob' };
+        setMessages(prev => [...prev, userMsg]);
 
-            } catch (error) {
-                console.error("Error sending voice:", error);
-                const errMsg: Message = { id: Date.now().toString(), role: 'assistant', content: 'Errore durante la comunicazione con N8N.' };
-                setMessages(prev => [...prev, errMsg]);
-                setIsAiSpeaking(false);
-            } finally {
-                setIsLoading(false);
+        try {
+            // --- VALIDATE SESSION BEFORE SENDING ---
+            let activeSessionId = sessionIdRef.current;
+            try {
+                activeSessionId = await validateSession();
+                console.log("Session Validated:", activeSessionId);
+            } catch (validationErr) {
+                console.error("Session Validation Failed:", validationErr);
+                throw new Error("Impossibile connettersi al servizio voce. Riprova.");
             }
-        };
+
+            const formData = new FormData();
+            formData.append('file', audioBlob, 'recording.wav');
+
+            // Prepare payload with full history
+            // Use Ref to ensure we have the absolute latest messages, escaping any stale closures
+            const historyPayload = messagesRef.current.map(({ role, content }) => ({ role, content }));
+
+            // UPDATE: N8N didn't auto-parse "deep" brackets. 
+            // Turning back to standard JSON string in body. User will Parse JSON in N8N.
+            formData.append('messages', JSON.stringify(historyPayload));
+
+            // Add Session ID from WebSocket (Use Ref to avoid stale closure)
+            if (activeSessionId) {
+                formData.append('sessionId', activeSessionId);
+            }
+
+            const response = await fetch(N8N_VOICE_URL, {
+                method: 'POST',
+                body: formData
+            });
+
+            if (!response.ok) throw new Error('Network response was not ok');
+
+            const data = await response.json();
+            console.log("N8N Voice Response:", data);
+
+            // Structure: [{ success: true, data: { transcription, message_text, audio_base64, ... } }]
+            const resultData = Array.isArray(data) ? data[0]?.data : data?.data;
+
+            if (!resultData) {
+                throw new Error("Invalid N8N voice response format");
+            }
+
+            const { message_text, transcription, endConversation } = resultData;
+
+            // UPDATE USER MESSAGE WITH TRANSCRIPTION
+            setMessages(prev => prev.map(msg =>
+                msg.id === tempId
+                    ? { ...msg, content: transcription || "Messaggio vocale" }
+                    : msg
+            ));
+
+            // Just add the text prompt. The Audio will come via WS.
+            const aiMsg: Message = {
+                id: Date.now().toString(),
+                role: 'assistant',
+                content: message_text || 'Risposta Vocale (Streaming)',
+                // No audioUrl, or we can use a dummy one if UI needs it for visualizer
+            };
+            setMessages(prev => [...prev, aiMsg]);
+
+            // NOTE: We do NOT play audio here anymore. The WS handles 'tts_start' -> 'audio_chunk' -> events.
+            // But we do handle flow control (endConversation logic)
+
+            if (endConversation) {
+                // If ends, we switch to text mode. 
+                // We should technically wait for audio to finish?
+                // But the WS 'tts_end' handler handles the resume logic.
+                // We'll set a flag or just force switch.
+                // Optimally we wait.
+
+                // Let's set mode to text immediately to prevent *sending* more audio,
+                // but we let the current audio finish playing.
+                setMode('text');
+            }
+            // If NOT endConversation, the WS 'tts_end' event will trigger startRecording()
+            // because mode is still 'voice'.
+
+        } catch (error) {
+            console.error("Error sending voice:", error);
+            const errMsg: Message = { id: Date.now().toString(), role: 'assistant', content: 'Errore durante la comunicazione con N8N.' };
+            setMessages(prev => [...prev, errMsg]);
+            setIsAiSpeaking(false);
+        } finally {
+            setIsLoading(false);
+        }
+    };
 
 
-        return (
-            <div className="flex flex-col h-screen bg-[#0b0f19] text-white overflow-hidden">
-                {/* Header */}
-                <header className="px-6 py-4 flex justify-between items-center bg-[#030712]/80 backdrop-blur-md border-b border-white/5 z-20">
-                    <div className="flex items-center gap-4">
-                        <div className="relative">
-                            <div className="w-10 h-10 rounded-full bg-gradient-to-br from-blue-500 to-indigo-600 p-0.5">
-                                <div className="w-full h-full rounded-full bg-black flex items-center justify-center">
-                                    <Bot size={20} className="text-blue-400" />
-                                </div>
+    return (
+        <div className="flex flex-col h-screen bg-[#0b0f19] text-white overflow-hidden">
+            {/* Header */}
+            <header className="px-6 py-4 flex justify-between items-center bg-[#030712]/80 backdrop-blur-md border-b border-white/5 z-20">
+                <div className="flex items-center gap-4">
+                    <div className="relative">
+                        <div className="w-10 h-10 rounded-full bg-gradient-to-br from-blue-500 to-indigo-600 p-0.5">
+                            <div className="w-full h-full rounded-full bg-black flex items-center justify-center">
+                                <Bot size={20} className="text-blue-400" />
                             </div>
-                            <div className="absolute bottom-0 right-0 w-3 h-3 bg-emerald-500 border-2 border-[#030712] rounded-full animate-pulse" />
                         </div>
-                        <div>
-                            <h1 className="font-bold text-lg tracking-tight">Clinica Veterinaria Neural</h1>
-                            <div className="flex items-center gap-2 text-xs text-slate-400 font-medium font-mono">
-                                <Globe size={12} />
-                                <span>EU-WEST-1 CONNECTED</span>
-                            </div>
+                        <div className="absolute bottom-0 right-0 w-3 h-3 bg-emerald-500 border-2 border-[#030712] rounded-full animate-pulse" />
+                    </div>
+                    <div>
+                        <h1 className="font-bold text-lg tracking-tight">Clinica Veterinaria Neural</h1>
+                        <div className="flex items-center gap-2 text-xs text-slate-400 font-medium font-mono">
+                            <Globe size={12} />
+                            <span>EU-WEST-1 CONNECTED</span>
                         </div>
                     </div>
-                    <Link to="/" className="px-4 py-2 text-xs font-bold text-slate-400 hover:text-white border border-white/5 hover:border-white/20 rounded-lg transition-all uppercase tracking-wider">Disconnetti</Link>
-                </header>
-
-                {/* Messages */}
-                <div className="flex-1 overflow-y-auto p-4 md:p-8 space-y-8 relative z-0" ref={scrollRef}>
-                    <div className="absolute inset-0 bg-[url('https://grainy-gradients.vercel.app/noise.svg')] opacity-20 pointer-events-none" />
-
-                    {messages.map(msg => (
-                        <motion.div
-                            key={msg.id}
-                            initial={{ opacity: 0, y: 15, scale: 0.95 }}
-                            animate={{ opacity: 1, y: 0, scale: 1 }}
-                            className={cn(
-                                "flex gap-4 max-w-3xl relative z-10",
-                                msg.role === 'user' ? "ml-auto flex-row-reverse" : ""
-                            )}
-                        >
-                            <div className={cn(
-                                "w-10 h-10 rounded-full flex items-center justify-center shrink-0 shadow-lg",
-                                msg.role === 'user' ? "bg-slate-800 text-slate-200" : "bg-gradient-to-br from-blue-600 to-indigo-600 text-white"
-                            )}>
-                                {msg.role === 'user' ? <User size={18} /> : <Bot size={18} />}
-                            </div>
-                            <div className={cn(
-                                "rounded-2xl px-6 py-4 shadow-xl backdrop-blur-sm border flex flex-col gap-3",
-                                msg.role === 'user' ? "bg-white/10 border-white/5 text-white" : "bg-blue-600/10 border-blue-500/20 text-blue-50"
-                            )}>
-                                {msg.audioUrl && (
-                                    <div className="flex items-center gap-3 mb-1">
-                                        {msg.role === 'assistant' ? (
-                                            <>
-                                                <button onClick={() => playAudioResponse(msg.audioUrl!)} className="p-2 bg-white/10 rounded-full hover:bg-white/20 transition-colors">
-                                                    <Volume2 className="animate-pulse" size={18} />
-                                                </button>
-                                                <div className="h-6 flex items-center gap-0.5">
-                                                    {[...Array(8)].map((_, i) => (
-                                                        <div key={i} className="w-0.5 bg-current opacity-50 rounded-full animate-[pulse_1s_infinite]" style={{ height: Math.random() * 16 + 8 + 'px', animationDelay: i * 0.1 + 's' }} />
-                                                    ))}
-                                                </div>
-                                            </>
-                                        ) : (
-                                            <div className="flex items-center gap-2 text-slate-400 text-xs uppercase tracking-wider font-bold">
-                                                <Mic size={12} /> Audio Sent
-                                            </div>
-                                        )}
-                                    </div>
-                                )}
-                                <p className="leading-relaxed text-[15px] whitespace-pre-wrap">{msg.content}</p>
-                            </div>
-                        </motion.div>
-                    ))}
-
-                    {/* AI Speaking Indicator */}
-                    {isAiSpeaking && (
-                        <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} className="flex gap-4 max-w-3xl">
-                            <div className="w-10 h-10 rounded-full bg-gradient-to-br from-blue-600 to-indigo-600 flex items-center justify-center shrink-0 animate-pulse">
-                                <Volume2 size={18} className="text-white" />
-                            </div>
-                            <div className="bg-blue-600/5 border border-blue-500/10 rounded-2xl px-6 py-4 flex items-center gap-2">
-                                <div className="flex gap-1 h-3 items-end">
-                                    <span className="w-1 bg-blue-400 animate-[bounce_0.5s_infinite] h-full"></span>
-                                    <span className="w-1 bg-blue-400 animate-[bounce_0.5s_infinite_0.1s] h-full"></span>
-                                    <span className="w-1 bg-blue-400 animate-[bounce_0.5s_infinite_0.2s] h-full"></span>
-                                </div>
-                                <span className="text-xs font-mono text-blue-400">AUDIO OUTPUT ACTIVE...</span>
-                            </div>
-                        </motion.div>
-                    )}
-
-                    {isLoading && !isAiSpeaking && (
-                        <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} className="flex gap-4 max-w-3xl">
-                            <div className="w-10 h-10 rounded-full bg-gradient-to-br from-blue-600 to-indigo-600 flex items-center justify-center shrink-0">
-                                <Loader2 size={18} className="text-white animate-spin" />
-                            </div>
-                            <div className="bg-blue-600/5 border border-blue-500/10 rounded-2xl px-6 py-4 flex items-center gap-2">
-                                <span className="text-xs font-mono text-blue-400">ANALYZING INPUT...</span>
-                            </div>
-                        </motion.div>
-                    )}
                 </div>
+                <Link to="/" className="px-4 py-2 text-xs font-bold text-slate-400 hover:text-white border border-white/5 hover:border-white/20 rounded-lg transition-all uppercase tracking-wider">Disconnetti</Link>
+            </header>
 
-                {/* Input Area */}
-                <div className="p-6 bg-[#030712] border-t border-white/5 relative z-20">
-                    <div className="max-w-4xl mx-auto">
-                        {/* Mode Switcher */}
-                        <div className="flex justify-center mb-6">
-                            <div className="bg-white/5 p-1.5 rounded-full flex gap-1 border border-white/10 backdrop-blur-md">
-                                <button
-                                    onClick={() => setMode('text')}
-                                    className={cn("px-6 py-2 rounded-full text-sm font-bold transition-all", mode === 'text' ? "bg-gradient-to-r from-blue-600 to-indigo-600 text-white shadow-lg" : "text-slate-400 hover:text-white")}
-                                >
-                                    CHAT
-                                </button>
-                                <button
-                                    onClick={() => setMode('voice')}
-                                    className={cn("px-6 py-2 rounded-full text-sm font-bold transition-all", mode === 'voice' ? "bg-gradient-to-r from-indigo-600 to-purple-600 text-white shadow-lg" : "text-slate-400 hover:text-white")}
-                                >
-                                    CALL
-                                </button>
-                            </div>
-                        </div>
+            {/* Messages */}
+            <div className="flex-1 overflow-y-auto p-4 md:p-8 space-y-8 relative z-0" ref={scrollRef}>
+                <div className="absolute inset-0 bg-[url('https://grainy-gradients.vercel.app/noise.svg')] opacity-20 pointer-events-none" />
 
-                        {mode === 'text' ? (
-                            <div className="flex gap-3 relative">
-                                <input
-                                    type="text"
-                                    value={input}
-                                    onChange={(e) => setInput(e.target.value)}
-                                    onKeyDown={(e) => e.key === 'Enter' && handleSendText()}
-                                    placeholder="Digita comando o richiesta..."
-                                    className="flex-1 bg-white/5 border border-white/10 hover:border-white/20 text-white rounded-2xl px-6 py-4 focus:outline-none focus:border-blue-500/50 focus:ring-1 focus:ring-blue-500/50 transition-all font-medium placeholder-slate-600"
-                                />
-                                <button
-                                    onClick={handleSendText}
-                                    disabled={!input.trim() || isLoading}
-                                    className="bg-indigo-600 hover:bg-indigo-500 disabled:opacity-50 disabled:grayscale text-white p-4 rounded-2xl transition-all shadow-lg hover:shadow-indigo-500/20 active:scale-95"
-                                >
-                                    <Send size={24} />
-                                </button>
-                            </div>
-                        ) : (
-                            <div className="flex flex-col items-center justify-center py-6 gap-6 relative">
-                                {/* STATUS TEXT */}
-                                <p className="text-slate-400 font-mono text-xs tracking-widest uppercase">
-                                    {isConnecting ? <span className="text-emerald-400 animate-pulse">Connessione in corso...</span> :
-                                        isAiSpeaking ? <span className="text-blue-400 animate-pulse">● Valentina sta parlando...</span> :
-                                            isRecording ? (
-                                                isSpeechDetected ?
-                                                    <span className="text-emerald-400 animate-pulse font-bold">● Voce Rilevata...</span> :
-                                                    <span className="text-amber-400 animate-pulse">● In attesa di voce...</span>
-                                            ) :
-                                                ""}
-                                </p>
-
-                                {/* MAIN BUTTON (NON-CLICKABLE AS PER REQUEST) */}
-                                <button
-                                    disabled={true} // Visual only
-                                    className={cn(
-                                        "w-24 h-24 rounded-full flex items-center justify-center transition-all duration-300 relative group cursor-default",
-                                        isConnecting ? "bg-emerald-500/20" :
-                                            isRecording ? "bg-red-500/20" : isAiSpeaking ? "bg-slate-600/20" : "bg-blue-600/20"
-                                    )}
-                                >
-                                    <div className={cn("absolute inset-0 rounded-full border-2 opacity-50 scale-110",
-                                        isConnecting ? "border-emerald-500 animate-[ping_1.5s_infinite]" :
-                                            isRecording ? "border-red-500 animate-[ping_1.5s_infinite]" :
-                                                isAiSpeaking ? "border-slate-500" : "border-blue-500"
-                                    )} />
-
-                                    {/* Visualizer Ring based on volume (only active when user is recording/speaking) */}
-                                    {isRecording && !isAiSpeaking && !isConnecting && (
-                                        <div
-                                            className="absolute inset-0 rounded-full border-[3px] border-red-400 opacity-80"
-                                            style={{ transform: `scale(${1 + audioVolume / 50})`, transition: 'transform 0.1s ease-out' }}
-                                        />
-                                    )}
-
-                                    <div className={cn("w-16 h-16 rounded-full flex items-center justify-center shadow-lg transition-all",
-                                        isConnecting ? "bg-emerald-500 shadow-emerald-500/40" :
-                                            isRecording ? "bg-red-500 shadow-red-500/40 scale-90" :
-                                                isAiSpeaking ? "bg-slate-600 shadow-slate-600/40" : "bg-blue-500 shadow-blue-500/40"
-                                    )}>
-                                        {isConnecting ? (
-                                            <motion.div
-                                                animate={{
-                                                    rotate: [-5, 5, -5, 5, 0],
-                                                }}
-                                                transition={{
-                                                    duration: 0.5,
-                                                    repeat: Infinity,
-                                                    repeatType: "loop",
-                                                    ease: "linear"
-                                                }}
-                                            >
-                                                <Phone className="text-white fill-white" size={32} />
-                                            </motion.div>
-                                        ) :
-                                            isRecording ? <Mic className="text-white" size={32} /> :
-                                                isAiSpeaking ? <Volume2 className="text-white animate-pulse" size={32} /> :
-                                                    <Mic className="text-white" size={32} />}
-                                    </div>
-                                </button>
-
-                                <p className="text-slate-500 font-bold text-sm tracking-widest uppercase">
-                                    PARLA CON VALENTINA
-                                </p>
-                            </div>
+                {messages.map(msg => (
+                    <motion.div
+                        key={msg.id}
+                        initial={{ opacity: 0, y: 15, scale: 0.95 }}
+                        animate={{ opacity: 1, y: 0, scale: 1 }}
+                        className={cn(
+                            "flex gap-4 max-w-3xl relative z-10",
+                            msg.role === 'user' ? "ml-auto flex-row-reverse" : ""
                         )}
+                    >
+                        <div className={cn(
+                            "w-10 h-10 rounded-full flex items-center justify-center shrink-0 shadow-lg",
+                            msg.role === 'user' ? "bg-slate-800 text-slate-200" : "bg-gradient-to-br from-blue-600 to-indigo-600 text-white"
+                        )}>
+                            {msg.role === 'user' ? <User size={18} /> : <Bot size={18} />}
+                        </div>
+                        <div className={cn(
+                            "rounded-2xl px-6 py-4 shadow-xl backdrop-blur-sm border flex flex-col gap-3",
+                            msg.role === 'user' ? "bg-white/10 border-white/5 text-white" : "bg-blue-600/10 border-blue-500/20 text-blue-50"
+                        )}>
+                            {msg.audioUrl && (
+                                <div className="flex items-center gap-3 mb-1">
+                                    {msg.role === 'assistant' ? (
+                                        <>
+                                            <button onClick={() => playAudioResponse(msg.audioUrl!)} className="p-2 bg-white/10 rounded-full hover:bg-white/20 transition-colors">
+                                                <Volume2 className="animate-pulse" size={18} />
+                                            </button>
+                                            <div className="h-6 flex items-center gap-0.5">
+                                                {[...Array(8)].map((_, i) => (
+                                                    <div key={i} className="w-0.5 bg-current opacity-50 rounded-full animate-[pulse_1s_infinite]" style={{ height: Math.random() * 16 + 8 + 'px', animationDelay: i * 0.1 + 's' }} />
+                                                ))}
+                                            </div>
+                                        </>
+                                    ) : (
+                                        <div className="flex items-center gap-2 text-slate-400 text-xs uppercase tracking-wider font-bold">
+                                            <Mic size={12} /> Audio Sent
+                                        </div>
+                                    )}
+                                </div>
+                            )}
+                            <p className="leading-relaxed text-[15px] whitespace-pre-wrap">{msg.content}</p>
+                        </div>
+                    </motion.div>
+                ))}
+
+                {/* AI Speaking Indicator */}
+                {isAiSpeaking && (
+                    <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} className="flex gap-4 max-w-3xl">
+                        <div className="w-10 h-10 rounded-full bg-gradient-to-br from-blue-600 to-indigo-600 flex items-center justify-center shrink-0 animate-pulse">
+                            <Volume2 size={18} className="text-white" />
+                        </div>
+                        <div className="bg-blue-600/5 border border-blue-500/10 rounded-2xl px-6 py-4 flex items-center gap-2">
+                            <div className="flex gap-1 h-3 items-end">
+                                <span className="w-1 bg-blue-400 animate-[bounce_0.5s_infinite] h-full"></span>
+                                <span className="w-1 bg-blue-400 animate-[bounce_0.5s_infinite_0.1s] h-full"></span>
+                                <span className="w-1 bg-blue-400 animate-[bounce_0.5s_infinite_0.2s] h-full"></span>
+                            </div>
+                            <span className="text-xs font-mono text-blue-400">AUDIO OUTPUT ACTIVE...</span>
+                        </div>
+                    </motion.div>
+                )}
+
+                {isLoading && !isAiSpeaking && (
+                    <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} className="flex gap-4 max-w-3xl">
+                        <div className="w-10 h-10 rounded-full bg-gradient-to-br from-blue-600 to-indigo-600 flex items-center justify-center shrink-0">
+                            <Loader2 size={18} className="text-white animate-spin" />
+                        </div>
+                        <div className="bg-blue-600/5 border border-blue-500/10 rounded-2xl px-6 py-4 flex items-center gap-2">
+                            <span className="text-xs font-mono text-blue-400">ANALYZING INPUT...</span>
+                        </div>
+                    </motion.div>
+                )}
+            </div>
+
+            {/* Input Area */}
+            <div className="p-6 bg-[#030712] border-t border-white/5 relative z-20">
+                <div className="max-w-4xl mx-auto">
+                    {/* Mode Switcher */}
+                    <div className="flex justify-center mb-6">
+                        <div className="bg-white/5 p-1.5 rounded-full flex gap-1 border border-white/10 backdrop-blur-md">
+                            <button
+                                onClick={() => setMode('text')}
+                                className={cn("px-6 py-2 rounded-full text-sm font-bold transition-all", mode === 'text' ? "bg-gradient-to-r from-blue-600 to-indigo-600 text-white shadow-lg" : "text-slate-400 hover:text-white")}
+                            >
+                                CHAT
+                            </button>
+                            <button
+                                onClick={() => setMode('voice')}
+                                className={cn("px-6 py-2 rounded-full text-sm font-bold transition-all", mode === 'voice' ? "bg-gradient-to-r from-indigo-600 to-purple-600 text-white shadow-lg" : "text-slate-400 hover:text-white")}
+                            >
+                                CALL
+                            </button>
+                        </div>
                     </div>
+
+                    {mode === 'text' ? (
+                        <div className="flex gap-3 relative">
+                            <input
+                                type="text"
+                                value={input}
+                                onChange={(e) => setInput(e.target.value)}
+                                onKeyDown={(e) => e.key === 'Enter' && handleSendText()}
+                                placeholder="Digita comando o richiesta..."
+                                className="flex-1 bg-white/5 border border-white/10 hover:border-white/20 text-white rounded-2xl px-6 py-4 focus:outline-none focus:border-blue-500/50 focus:ring-1 focus:ring-blue-500/50 transition-all font-medium placeholder-slate-600"
+                            />
+                            <button
+                                onClick={handleSendText}
+                                disabled={!input.trim() || isLoading}
+                                className="bg-indigo-600 hover:bg-indigo-500 disabled:opacity-50 disabled:grayscale text-white p-4 rounded-2xl transition-all shadow-lg hover:shadow-indigo-500/20 active:scale-95"
+                            >
+                                <Send size={24} />
+                            </button>
+                        </div>
+                    ) : (
+                        <div className="flex flex-col items-center justify-center py-6 gap-6 relative">
+                            {/* STATUS TEXT */}
+                            <p className="text-slate-400 font-mono text-xs tracking-widest uppercase">
+                                {isConnecting ? <span className="text-emerald-400 animate-pulse">Connessione in corso...</span> :
+                                    isAiSpeaking ? <span className="text-blue-400 animate-pulse">● Valentina sta parlando...</span> :
+                                        isRecording ? (
+                                            isSpeechDetected ?
+                                                <span className="text-emerald-400 animate-pulse font-bold">● Voce Rilevata...</span> :
+                                                <span className="text-amber-400 animate-pulse">● In attesa di voce...</span>
+                                        ) :
+                                            ""}
+                            </p>
+
+                            {/* MAIN BUTTON (NON-CLICKABLE AS PER REQUEST) */}
+                            <button
+                                disabled={true} // Visual only
+                                className={cn(
+                                    "w-24 h-24 rounded-full flex items-center justify-center transition-all duration-300 relative group cursor-default",
+                                    isConnecting ? "bg-emerald-500/20" :
+                                        isRecording ? "bg-red-500/20" : isAiSpeaking ? "bg-slate-600/20" : "bg-blue-600/20"
+                                )}
+                            >
+                                <div className={cn("absolute inset-0 rounded-full border-2 opacity-50 scale-110",
+                                    isConnecting ? "border-emerald-500 animate-[ping_1.5s_infinite]" :
+                                        isRecording ? "border-red-500 animate-[ping_1.5s_infinite]" :
+                                            isAiSpeaking ? "border-slate-500" : "border-blue-500"
+                                )} />
+
+                                {/* Visualizer Ring based on volume (only active when user is recording/speaking) */}
+                                {isRecording && !isAiSpeaking && !isConnecting && (
+                                    <div
+                                        className="absolute inset-0 rounded-full border-[3px] border-red-400 opacity-80"
+                                        style={{ transform: `scale(${1 + audioVolume / 50})`, transition: 'transform 0.1s ease-out' }}
+                                    />
+                                )}
+
+                                <div className={cn("w-16 h-16 rounded-full flex items-center justify-center shadow-lg transition-all",
+                                    isConnecting ? "bg-emerald-500 shadow-emerald-500/40" :
+                                        isRecording ? "bg-red-500 shadow-red-500/40 scale-90" :
+                                            isAiSpeaking ? "bg-slate-600 shadow-slate-600/40" : "bg-blue-500 shadow-blue-500/40"
+                                )}>
+                                    {isConnecting ? (
+                                        <motion.div
+                                            animate={{
+                                                rotate: [-5, 5, -5, 5, 0],
+                                            }}
+                                            transition={{
+                                                duration: 0.5,
+                                                repeat: Infinity,
+                                                repeatType: "loop",
+                                                ease: "linear"
+                                            }}
+                                        >
+                                            <Phone className="text-white fill-white" size={32} />
+                                        </motion.div>
+                                    ) :
+                                        isRecording ? <Mic className="text-white" size={32} /> :
+                                            isAiSpeaking ? <Volume2 className="text-white animate-pulse" size={32} /> :
+                                                <Mic className="text-white" size={32} />}
+                                </div>
+                            </button>
+
+                            <p className="text-slate-500 font-bold text-sm tracking-widest uppercase">
+                                PARLA CON VALENTINA
+                            </p>
+                        </div>
+                    )}
                 </div>
             </div>
-        );
-    }
+        </div>
+    );
+}
