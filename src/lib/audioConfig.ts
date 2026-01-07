@@ -27,16 +27,16 @@ export const getAudioConstraints = () => {
 };
 
 export const getAudioGain = () => {
-    // Mobile (DSP On): 2.0x 
+    // Mobile (DSP On): 1.2x (Lowered from 2.0x to prevent clipping on AGC signals)
     // Desktop (Raw): 1.5x (Lowered from 4.0x to fix noise-floor pumping)
-    return isMobileDevice() ? 2.0 : 1.5;
+    return isMobileDevice() ? 1.2 : 1.5;
 };
 
 export const getVADThresholds = () => {
     const isMobile = isMobileDevice();
     return {
-        start: isMobile ? 20 : 25,
-        stop: 10,
+        start: isMobile ? 30 : 25, // Higher threshold for mobile to ignore background noise
+        stop: isMobile ? 15 : 10,
         silenceLimit: 1500
     };
 };
