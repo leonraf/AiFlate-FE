@@ -4,7 +4,7 @@ import { Link } from 'react-router-dom';
 import { motion } from 'framer-motion';
 import { cn } from '../lib/utils';
 import { encodeWAV } from '../lib/audio';
-import { getAudioConstraints, getVADThresholds, createAudioProcessor } from '../lib/audioConfig';
+import { getAudioConstraints, getVADThresholds, createAudioProcessor, isMobileDevice } from '../lib/audioConfig';
 import { Mic, Square, Activity } from 'lucide-react';
 
 export default function TestAudioPage() {
@@ -33,6 +33,7 @@ export default function TestAudioPage() {
     // VAD Refs
     const silenceStartRef = useRef<number | null>(null);
     const speechStartTimeRef = useRef<number | null>(null);
+    const speechPotentialStartRef = useRef<number | null>(null); // For start debounce
     const animationFrameRef = useRef<number>();
 
     // 1. HOT MIC SETUP (With Vocal Chain)
@@ -175,20 +176,33 @@ export default function TestAudioPage() {
             // Adaptive Thresholds
 
             // Adaptive Thresholds (Centralized)
-            const { start: START_THRESHOLD, stop: STOP_THRESHOLD, silenceLimit: SILENCE_LIMIT } = getVADThresholds();
+            const { start: START_THRESHOLD, stop: STOP_THRESHOLD, silenceLimit: SILENCE_LIMIT, minSpeechDuration: MIN_DURATION } = getVADThresholds();
 
             if (!isSpeechActiveRef.current) {
                 // WAITING FOR SPEECH
                 if (avg > START_THRESHOLD) {
-                    isSpeechActiveRef.current = true;
-                    setIsRecording(true);
-                    speechStartTimeRef.current = Date.now();
-                    silenceStartRef.current = null;
-                    setStatus("Sto registrando...");
-                    mainBufferRef.current = [...ringBufferRef.current];
+                    // Potential Speech Detected
+                    if (!speechPotentialStartRef.current) {
+                        speechPotentialStartRef.current = Date.now();
+                    } else if (Date.now() - speechPotentialStartRef.current > (MIN_DURATION || 50)) {
+                        // CONFIRMED SPEECH START (Debounce Passed)
+                        isSpeechActiveRef.current = true;
+                        setIsRecording(true);
+                        speechStartTimeRef.current = Date.now();
+                        silenceStartRef.current = null;
+                        speechPotentialStartRef.current = null; // Reset debounce ref
+                        setStatus("Sto registrando...");
+                        mainBufferRef.current = [...ringBufferRef.current];
+                    }
+                } else {
+                    // Reset if it drops below threshold before confirming
+                    speechPotentialStartRef.current = null;
                 }
             } else {
                 // RECORDING
+                // Reset debounce ref anyway
+                speechPotentialStartRef.current = null;
+
                 if (avg < STOP_THRESHOLD) { // Silence Threshold
                     if (!silenceStartRef.current) silenceStartRef.current = Date.now();
                     else if (Date.now() - silenceStartRef.current > SILENCE_LIMIT) {
@@ -259,7 +273,7 @@ export default function TestAudioPage() {
                 </div>
 
                 <div className="text-center text-[10px] text-gray-600 space-y-1">
-                    <p>Chain: HPF(150Hz), LowShelf(200Hz,-5dB), Presence(+5dB)</p>
+                    <p>audioConfig: {isMobileDevice() ? "Mobile DSP (Gain 1.0, Thr 45)" : "Desktop Pure (Gain 1.5, Thr 25)"}</p>
                 </div>
             </main>
         </div>

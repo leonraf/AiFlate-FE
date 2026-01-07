@@ -37,6 +37,7 @@ export const getVADThresholds = () => {
     return {
         start: isMobile ? 45 : 25, // Aggressive threshold (45) for mobile to block TV/Background
         stop: isMobile ? 20 : 10,
+        minSpeechDuration: isMobile ? 200 : 50, // Require 200ms of sustained speech to trigger (Anti-Spike)
         silenceLimit: 1500
     };
 };
